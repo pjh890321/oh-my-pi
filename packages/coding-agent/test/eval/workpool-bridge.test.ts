@@ -1,6 +1,8 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import { AsyncJobManager } from "../../src/async";
 import { Settings } from "../../src/config/settings";
+import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
+import { executeJs } from "../../src/eval/js/executor";
 import { runEvalWorkpool } from "../../src/eval/workpool-bridge";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import * as discovery from "../../src/task/discovery";
@@ -45,6 +47,10 @@ afterEach(async () => {
 	WorkPoolRegistry.resetForTests();
 });
 
+afterAll(async () => {
+	await disposeAllVmContexts();
+});
+
 describe("runEvalWorkpool", () => {
 	it("validates operation arguments", async () => {
 		const session = makeSession();
@@ -86,6 +92,30 @@ describe("runEvalWorkpool", () => {
 		});
 		await expect(runEvalWorkpool({ op: "wait", name: "scout-pool" }, { session })).rejects.toThrow(
 			'unknown workpool operation "wait"',
+		);
+	});
+
+	it("rejects a per-call model passed in JavaScript workpool() options before creating a pool (issue #7982)", async () => {
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [SCOUT], projectAgentsDir: null });
+		const session = makeSession();
+		const result = await executeJs(
+			[
+				"try {",
+				'	await workpool("scout", { model: "p/model" });',
+				'	return "created";',
+				"} catch (error) {",
+				"	return String(error?.message ?? error);",
+				"}",
+			].join("\n"),
+			{ sessionId: `workpool-js-model:${crypto.randomUUID()}`, session },
+		);
+
+		expect(result.exitCode).toBe(0);
+		const output = result.output.trim();
+		expect(output).not.toBe("created");
+		expect(output).toMatch(/model/i);
+		await expect(runEvalWorkpool({ op: "status", name: "scout-pool" }, { session })).rejects.toThrow(
+			'unknown workpool "scout-pool"',
 		);
 	});
 });

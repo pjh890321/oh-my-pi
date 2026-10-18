@@ -344,20 +344,6 @@ describe("runEvalAgent", () => {
 		expect(secondOptions.outputSchemaOverridesAgent).toBeUndefined();
 	});
 
-	it("drops a per-call model argument on agent() (removed, issue #6438)", async () => {
-		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-
-		// The schema strips unknown keys; a legacy `model` argument is silently
-		// discarded so resolution is identical to omitting it — the agent's own
-		// frontmatter model applies (issue #6438).
-		await runEvalAgentAndWait({ prompt: "work", model: "default" }, { session: makeSession() });
-		await runEvalAgentAndWait({ prompt: "work" }, { session: makeSession() });
-
-		const withModel = runSpy.mock.calls[0]?.[0];
-		const withoutModel = runSpy.mock.calls[1]?.[0];
-		expect(withModel?.modelOverride).toEqual(withoutModel?.modelOverride);
-	});
 	it("returns host-parsed data for caller, agent, and inherited schemas", async () => {
 		const agentSchema = { type: "object" };
 		const sessionSchema = { type: "object" };
@@ -618,6 +604,32 @@ describe("agent() through eval runtimes", () => {
 		expect(output.data).toEqual({ ok: true, n: 3 });
 		expect(output.node.data).toEqual({ ok: true, n: 3 });
 		expect(output.node.handle).toBe(`agent://${output.node.id}`);
+	});
+
+	it("rejects a per-call model passed in JavaScript agent() options before dispatch (issue #7982)", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-agent-js-model-");
+		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent-model");
+		mockAgents();
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+
+		const result = await executeJs(
+			[
+				"try {",
+				'	const handle = await agent("work", { model: "default" });',
+				"	await handle.wait();",
+				'	return "created";',
+				"} catch (error) {",
+				"	return String(error?.message ?? error);",
+				"}",
+			].join("\n"),
+			{ cwd: tempDir.path(), sessionId: sharedJsSessionId, session, sessionFile },
+		);
+
+		expect(result.exitCode).toBe(0);
+		const output = result.output.trim();
+		expect(output).not.toBe("created");
+		expect(output).toMatch(/model/i);
+		expect(runSpy).not.toHaveBeenCalled();
 	});
 
 	it("runs JavaScript agent handles concurrently and returns results in input order", async () => {

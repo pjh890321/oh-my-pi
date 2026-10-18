@@ -378,7 +378,17 @@ export async function resolveEffectiveSubagentPolicy(
 			`Agent "${agentName}" is disabled in settings. Enable it via /agents, or use a different agent type.${enabled.length > 0 ? ` Available: ${enabled.join(", ")}` : ""}`,
 		);
 	}
-	if (agentName === SEANCE_AGENT_NAME && !isBundledSeance(agent)) assertPlanControlsAllowed(request, planMode);
+	if (agentName === SEANCE_AGENT_NAME && !isBundledSeance(agent)) {
+		// A custom shadow is an ordinary agent: decided here on the freshly discovered definition, since the
+		// task schema's seance advertisement comes from a catalog snapshot that can be stale (#7982).
+		assertPlanControlsAllowed(request, planMode);
+		if (request.model !== undefined) {
+			throw new StructuredSubagentError(
+				"preflight",
+				`\`model\` is only accepted for the bundled \`${SEANCE_AGENT_NAME}\` agent.`,
+			);
+		}
+	}
 	let preparedSeance: { modelPatterns: string[]; session: PreparedSeanceSession } | undefined;
 	if (isBundledSeance(agent)) {
 		try {

@@ -5,6 +5,7 @@ import { type WorkPoolPeekResult, type WorkPoolStatus, WorkPoolRegistry } from "
 import type { ToolSession } from "../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { JsStatusEvent } from "./js/shared/types";
+import { PER_CALL_MODEL_UNSUPPORTED } from "./agent-bridge";
 
 /** Synthetic bridge name reserved for eval work pools. */
 export const EVAL_WORKPOOL_BRIDGE_NAME = "__workpool__";
@@ -69,6 +70,7 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 	if (typeof op !== "string") throw new ToolError("workpool() requires an op");
 
 	if (op === "create") {
+		if (record.model !== undefined) throw new ToolError(PER_CALL_MODEL_UNSUPPORTED);
 		const agent = optionalString(record, "agent");
 		const requestedName = optionalString(record, "name");
 		const context = optionalString(record, "context");

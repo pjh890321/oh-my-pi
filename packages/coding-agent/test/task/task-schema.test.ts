@@ -1,25 +1,34 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import { type AgentTool, validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
 import { loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { getTaskSchema } from "@oh-my-pi/pi-coding-agent/task/types";
 import { isBundledSeance, seanceTaskSchemaFields } from "@oh-my-pi/pi-coding-agent/task/seance";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 
 let taskSchemaSessionIndex = 0;
 
-function createSession(
-	options: { parentSpawns?: string; disabledAgents?: string[]; planMode?: boolean } = {},
-): ToolSession {
+interface SessionOptions {
+	parentSpawns?: string;
+	disabledAgents?: string[];
+	planMode?: boolean;
+	batch?: boolean;
+}
+
+function createSession(options: SessionOptions = {}): ToolSession {
 	return {
 		cwd: `/tmp/task-schema-${taskSchemaSessionIndex++}`,
 		hasUI: false,
 		settings: Settings.isolated({
+			"async.enabled": false,
 			"task.isolation.enabled": false,
-			"task.batch": false,
+			"task.batch": options.batch ?? false,
 			"task.disabledAgents": options.disabledAgents ?? [],
 		}),
 		getSessionFile: () => null,
@@ -233,5 +242,150 @@ describe("task spawn validation", () => {
 		};
 		expect(schema(params) instanceof type.errors).toBe(false);
 		expect(await executeText(params, [bundledSeance])).toContain("`model` is only accepted for the `seance` agent.");
+	});
+});
+
+describe("per-call model rejection", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	const scoutAgent = loadBundledAgents().find(agent => agent.name === "scout")!;
+	const customSeance = parseAgent(
+		"project-seance.md",
+		`---
+name: seance
+description: Custom historical agent.
+---
+Custom prompt.`,
+		"project",
+	);
+	const work = { task: "Map the auth module.", solutionSpace: "focused inspection" };
+	const selector = "anthropic/claude-sonnet-4-5";
+	const customSeanceModel = "only accepted for the bundled `seance` agent";
+
+	// Dispatch the way the agent loop does: shared argument validation first, then execute().
+	// `executionAgents` is what the disk holds when the call runs; the tool snapshots `agents` at creation.
+	async function dispatch(
+		params: Record<string, unknown>,
+		agents: AgentDefinition[],
+		session: SessionOptions = {},
+		executionAgents: AgentDefinition[] = agents,
+	): Promise<{ text: string; spawned: number }> {
+		vi.spyOn(discoveryModule, "discoverAgents")
+			.mockResolvedValueOnce({ agents, projectAgentsDir: null })
+			.mockResolvedValue({ agents: executionAgents, projectAgentsDir: null });
+		let spawned = 0;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async (options): Promise<SingleResult> => {
+			spawned++;
+			return {
+				index: 0,
+				id: options.id ?? "spawn",
+				agent: options.agent.name,
+				agentSource: options.agent.source,
+				task: work.task,
+				assignment: work.task,
+				exitCode: 0,
+				output: "done",
+				stderr: "",
+				truncated: false,
+				durationMs: 1,
+				tokens: 0,
+				requests: 1,
+			};
+		});
+		const tool = await TaskTool.create(createSession(session));
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "tool-call",
+			name: tool.name,
+			arguments: params,
+		});
+		const result = await tool.execute("tool-call", args);
+		return { text: result.content.find(part => part.type === "text")?.text ?? "", spawned };
+	}
+
+	it("rejects a batch item model for an ordinary agent while seance is hidden", async () => {
+		const { text, spawned } = await dispatch(
+			{ context: "Shared context.", tasks: [{ agent: "scout", ...work, model: selector }] },
+			[bundledSeance, scoutAgent],
+			{ batch: true, disabledAgents: ["seance"] },
+		);
+		expect(text).toContain("`model` is only accepted for the `seance` agent.");
+		expect(spawned).toBe(0);
+	});
+
+	it("rejects a model for a custom agent named seance in flat and batch calls", async () => {
+		const flat = await dispatch({ agent: "seance", ...work, model: selector }, [customSeance]);
+		expect(flat.text).toContain(customSeanceModel);
+		expect(flat.spawned).toBe(0);
+		vi.restoreAllMocks();
+
+		const batch = await dispatch(
+			{ context: "Shared context.", tasks: [{ agent: "seance", ...work, model: selector }] },
+			[customSeance],
+			{ batch: true },
+		);
+		expect(batch.text).toContain(customSeanceModel);
+		expect(batch.spawned).toBe(0);
+	});
+
+	it("rejects a model for a custom seance added after the task tool was created", async () => {
+		const { text, spawned } = await dispatch(
+			{ agent: "seance", ...work, sourceSession: "/sessions/source.jsonl", model: selector },
+			[bundledSeance],
+			{},
+			[customSeance],
+		);
+		expect(text).toContain(customSeanceModel);
+		expect(spawned).toBe(0);
+	});
+
+	it("routes a flat seance call with a model to bundled seance source resolution once a custom shadow is gone", async () => {
+		const { text } = await dispatch(
+			{ agent: "seance", ...work, sourceSession: "/missing/source.jsonl", model: selector },
+			[customSeance],
+			{},
+			[bundledSeance],
+		);
+		expect(text).toContain("The selected session file was not found");
+	});
+
+	it("routes an advertised seance call with a model to bundled seance source resolution", async () => {
+		const { text } = await dispatch(
+			{ agent: "seance", ...work, sourceSession: "/missing/source.jsonl", model: selector },
+			[bundledSeance],
+		);
+		expect(text).toContain("The selected session file was not found");
+	});
+
+	it("keeps the hidden bundled seance's own reason whether or not a model is sent", async () => {
+		for (const model of [selector, undefined]) {
+			const { text, spawned } = await dispatch(
+				{ agent: "seance", ...work, sourceSession: "/missing/source.jsonl", ...(model ? { model } : {}) },
+				[bundledSeance],
+				{ planMode: true },
+			);
+			expect(text).toContain("Seance does not support plan mode");
+			expect(spawned).toBe(0);
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("spawns a custom agent named seance that only sends sourceSession", async () => {
+		const { spawned } = await dispatch({ agent: "seance", ...work, sourceSession: "/sessions/source.jsonl" }, [
+			customSeance,
+		]);
+		expect(spawned).toBe(1);
+	});
+
+	it('treats a "null" string model on an ordinary batch item as absent while seance is advertised', async () => {
+		const { text, spawned } = await dispatch(
+			{ context: "Shared context.", tasks: [{ agent: "scout", ...work, model: "null" }] },
+			[bundledSeance, scoutAgent],
+			{ batch: true },
+		);
+		expect(text).not.toContain("`model` is only accepted");
+		expect(spawned).toBe(1);
 	});
 });

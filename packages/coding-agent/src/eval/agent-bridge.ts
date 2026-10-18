@@ -2,6 +2,7 @@
  * Host-side handler for the eval `agent()` helper.
  */
 import { type } from "@oh-my-pi/omptype";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
 import {
@@ -21,6 +22,10 @@ import type { JsStatusEvent } from "./js/shared/types";
 
 /** Synthetic bridge name reserved for the `agent()` helper across both runtimes. */
 export const EVAL_AGENT_BRIDGE_NAME = "__agent__";
+
+/** Per-call model selection was removed (#6438); `agent()` and `workpool()` reject `model` instead of dropping it (#7982). */
+export const PER_CALL_MODEL_UNSUPPORTED =
+	"Per-call model selection is not supported; use a user-tagged `m1`, `m2`, … agent (tagged with `^` in the composer), the agent's frontmatter `model`, or the `task.agentModelOverrides` setting.";
 
 const agentArgsSchema = type({
 	prompt: "string>0",
@@ -85,6 +90,7 @@ export interface EvalAgentResult {
 }
 
 function parseAgentArgs(args: unknown): EvalAgentArgs {
+	if (isRecord(args) && args.model !== undefined) throw new ToolError(PER_CALL_MODEL_UNSUPPORTED);
 	const result = agentArgsSchema(args);
 	if (result instanceof type.errors) {
 		throw new ToolError(`agent() received invalid arguments: ${result.summary}`);

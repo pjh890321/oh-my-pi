@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a per-call `model` being silently dropped on task batch items while the bundled `seance` agent is unavailable and on JavaScript eval `agent()`/`workpool()`, and honored for a custom agent named `seance`; these calls are now rejected and leave no subagent running, unless argument repair of another field in the same task call drops `model` first ([#7982](https://github.com/can1357/oh-my-pi/issues/7982))
+
 ## [18.12.5] - 2026-10-21
 
 ### Added
